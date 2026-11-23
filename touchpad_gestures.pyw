@@ -80,6 +80,9 @@ user32.CallNextHookEx.argtypes = [W.HHOOK, ctypes.c_int, W.WPARAM, W.LPARAM]
 user32.GetForegroundWindow.restype = W.HWND
 user32.ShowWindowAsync.argtypes = [W.HWND, ctypes.c_int]
 user32.GetClassNameW.argtypes = [W.HWND, W.LPWSTR, ctypes.c_int]
+user32.SetTimer.restype = ctypes.c_size_t
+user32.SetTimer.argtypes = [W.HWND, ctypes.c_size_t, W.UINT, ctypes.c_void_p]
+user32.KillTimer.argtypes = [W.HWND, ctypes.c_size_t]
 kernel32.GetModuleHandleW.restype = W.HMODULE
 for f in (hid.HidP_GetValueCaps, hid.HidP_GetUsageValue, hid.HidP_GetUsages):
     f.restype = ctypes.c_long
@@ -193,8 +196,11 @@ def mouse_hook(code, wparam, lparam):
     return user32.CallNextHookEx(None, code, wparam, lparam)
 
 
-def minimize_foreground():
-    hwnd = user32.GetForegroundWindow()
+def modifiers_released():
+    return not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x10, 0x11, 0x12))  # Shift, Ctrl, Alt
+
+
+def minimize(hwnd):
     cls = ctypes.create_unicode_buffer(64)
     user32.GetClassNameW(hwnd, cls, 64)
     if hwnd and cls.value not in ('Progman', 'WorkerW', 'Shell_TrayWnd'):  # рабочий стол и панель задач не трогаем
@@ -217,9 +223,16 @@ def main():
     if DEBUG:
         print('running, hwnd', hwnd, 'hook', hook, '— закройте окно, чтобы выйти')
     msg = W.MSG()
+    pending = None  # (окно, таймер, крайний срок)
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-        if msg.message == 0x0312:  # WM_HOTKEY
-            minimize_foreground()
+        if msg.message == 0x0312 and not pending:  # WM_HOTKEY
+            # жест ещё держит Ctrl/Shift/Alt: свернём, когда отпустит, иначе окно не получит отпускание и они «залипнут»
+            pending = (user32.GetForegroundWindow(), user32.SetTimer(None, 0, 10, None), kernel32.GetTickCount() + 500)
+        elif msg.message == 0x0113 and pending and msg.wParam == pending[1]:  # WM_TIMER
+            if modifiers_released() or kernel32.GetTickCount() > pending[2]:
+                user32.KillTimer(None, pending[1])
+                minimize(pending[0])
+                pending = None
         elif msg.message == 0x00FF:  # WM_INPUT
             on_raw_input(msg.lParam)
         user32.TranslateMessage(ctypes.byref(msg))
